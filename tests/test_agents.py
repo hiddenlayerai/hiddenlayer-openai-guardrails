@@ -1,3 +1,4 @@
+from openai.types.responses import ResponseTextDeltaEvent
 import pytest
 
 from pathlib import Path
@@ -32,12 +33,32 @@ async def test_hiddenlayer_guardrails_benign_with_tools():
     agent = Agent(
         name="Haiku agent",
         instructions="Always respond in haiku form",
-        model="gpt-5-nano",
+        model="gpt-4o-mini",
         tools=[get_weather],
     )
 
     result = await Runner.run(agent, "What's the weather in Toronto", run_config=RunConfig(tracing_disabled=True))
     print(result.final_output)
+
+
+@pytest.mark.asyncio
+async def test_hiddenlayer_guardrails_benign_with_tools_streaming():
+    @function_tool
+    def get_weather(city: str) -> str:
+        """returns weather info for the specified city."""
+        return f"The weather in {city} is sunny"
+
+    agent = Agent(
+        name="Haiku agent",
+        instructions="Always respond in haiku form",
+        model="gpt-4o-mini",
+        tools=[get_weather],
+    )
+
+    result = Runner.run_streamed(agent, "What's the weather in Toronto", run_config=RunConfig(tracing_disabled=True))
+    async for event in result.stream_events():
+        if event.type == "raw_response_event" and isinstance(event.data, ResponseTextDeltaEvent):
+            print(event.data.delta, end="", flush=True)
 
 
 # @pytest.mark.asyncio
