@@ -10,7 +10,43 @@ Drop-in replacement for the Agents SDK `Agent` that wires HiddenLayer guardrails
 
 ### Configuration
 
-- Set `HIDDENLAYER_CLIENT_ID` and `HIDDENLAYER_CLIENT_SECRET` in your environment so the SDK can authenticate.
+#### Environment Variables
+
+The following environment variables must be set for authentication:
+
+- `HIDDENLAYER_CLIENT_ID` - HiddenLayer API client ID (required)
+- `HIDDENLAYER_CLIENT_SECRET` - HiddenLayer API client secret (required)
+
+Optional environment variables:
+
+- `HIDDENLAYER_PROJECT_ID` - HiddenLayer project ID for policy routing
+- `HIDDENLAYER_REQUESTER_ID` - Identifier for tracking requests (default: "hiddenlayer-openai-integration")
+
+```bash
+# Required
+export HIDDENLAYER_CLIENT_ID="your-client-id"
+export HIDDENLAYER_CLIENT_SECRET="your-client-secret"
+
+# Optional
+export HIDDENLAYER_PROJECT_ID="your-project-id"
+export HIDDENLAYER_REQUESTER_ID="your-app-name"
+```
+
+#### HiddenLayerParams
+
+Configure HiddenLayer behavior using the `HiddenLayerParams` object:
+
+```python
+from hiddenlayer_openai_guardrails import HiddenLayerParams
+
+params = HiddenLayerParams(
+    project_id="my-project",       # Optional: HiddenLayer project ID for policy routing
+    model="gpt-4o-mini",            # Optional: Model name for tracking (auto-detected from agent if not set)
+    requester_id="my-app-v1",      # Optional: Identifier for tracking requests (default: "hiddenlayer-openai-integration")
+)
+```
+
+All fields are optional. If `model` is not provided, it will be automatically detected from the agent's model configuration.
 
 ### Usage
 
@@ -21,7 +57,7 @@ The `Agent` class mirrors `agents.Agent` but adds HiddenLayer guardrails to the 
 ```python
 from agents import Runner, function_tool
 from agents.run import RunConfig
-from hiddenlayer_openai_guardrails import Agent
+from hiddenlayer_openai_guardrails import Agent, HiddenLayerParams
 
 
 @function_tool
@@ -30,12 +66,17 @@ def get_weather(city: str) -> str:
     return f"The weather in {city} is sunny"
 
 
+# Configure HiddenLayer parameters
+params = HiddenLayerParams(
+    project_id="my-project",  # optional: for policy routing
+)
+
 agent = Agent(
     name="Haiku agent",
     instructions="Always respond in haiku form",
     model="gpt-4o-mini",
     tools=[get_weather],  # tool input/output are screened by HiddenLayer
-    hiddenlayer_project_id="my-project",  # optional
+    hiddenlayer_params=params,  # optional: defaults will be used if not provided
 )
 
 result = Runner.run_sync(
@@ -54,23 +95,27 @@ Since OpenAI's guardrails can only block (not redact), this library provides hel
 from agents import Runner
 from hiddenlayer_openai_guardrails import (
     Agent,
+    HiddenLayerParams,
     redact_input,
     redact_output,
     InputBlockedError,
     OutputBlockedError,
 )
 
+# Configure HiddenLayer parameters
+params = HiddenLayerParams(project_id="my-project")
+
 agent = Agent(
     name="Assistant",
     instructions="You are a helpful assistant.",
-    hiddenlayer_project_id="my-project",
+    hiddenlayer_params=params,
 )
 
 try:
     # Redact sensitive info from user input before processing
     safe_input = await redact_input(
         user_input,
-        hiddenlayer_project_id="my-project",
+        hiddenlayer_params=params,
     )
 
     # Run agent (guardrails will block malicious content)
@@ -79,7 +124,7 @@ try:
     # Redact sensitive info from output before showing to user
     safe_output = await redact_output(
         result.final_output,
-        hiddenlayer_project_id="my-project",
+        hiddenlayer_params=params,
     )
     print(safe_output)
 
@@ -95,12 +140,19 @@ For streaming responses, use `redact_streamed_output` to buffer, scan, and repla
 
 ```python
 from agents import Runner
-from hiddenlayer_openai_guardrails import Agent, redact_streamed_output
+from hiddenlayer_openai_guardrails import Agent, HiddenLayerParams, redact_streamed_output
 
-agent = Agent(name="Assistant", instructions="Help users")
+# Configure HiddenLayer parameters
+params = HiddenLayerParams(project_id="my-project")
+
+agent = Agent(
+    name="Assistant",
+    instructions="Help users",
+    hiddenlayer_params=params,
+)
 result = Runner.run_streamed(agent, user_input)
 
-async for chunk in redact_streamed_output(result, hiddenlayer_project_id="my-project"):
+async for chunk in redact_streamed_output(result, hiddenlayer_params=params):
     print(chunk, end="", flush=True)
 ```
 
