@@ -26,14 +26,15 @@ from hiddenlayer import AsyncHiddenLayer
 from pydantic import BaseModel
 
 
-client = AsyncHiddenLayer()
 logger = logging.getLogger(__name__)
 
 
-class HiddenlayerParams(BaseModel):
-    model: str
-    project_id: str | None
-    requester_id: str
+class HiddenLayerParams(BaseModel):
+    """HiddenLayer request metadata and policy routing parameters."""
+
+    model: str | None = None
+    project_id: str | None = None
+    requester_id: str = "hiddenlayer-openai-integration"
 
 
 class HiddenlayerActions(str, Enum):
@@ -65,7 +66,8 @@ class AnalysisResult:
 async def _analyze_content(
     content: str,
     role: Literal["user", "assistant"],
-    hiddenlayer_params: HiddenlayerParams,
+    hiddenlayer_params: HiddenLayerParams,
+    client: AsyncHiddenLayer | None = None,
 ) -> Any:
     """Single location for all HiddenLayer API calls.
 
@@ -73,11 +75,19 @@ async def _analyze_content(
         content: The content to analyze
         role: "user" for input analysis, "assistant" for output analysis
         hiddenlayer_params: HiddenLayer configuration parameters
+        client: Optional AsyncHiddenLayer client instance
 
     Returns:
         Raw HiddenLayer analysis response
     """
-    metadata = {"model": hiddenlayer_params.model, "requester_id": hiddenlayer_params.requester_id}
+    if client is None:
+        client = AsyncHiddenLayer()
+
+    # Build metadata - only include model if it's set
+    metadata: dict[str, Any] = {"requester_id": hiddenlayer_params.requester_id}
+    if hiddenlayer_params.model:
+        metadata["model"] = hiddenlayer_params.model
+
     message = {"messages": [{"role": role, "content": content}]}
 
     kwargs: dict[str, Any] = {"metadata": metadata}
@@ -117,13 +127,15 @@ def _parse_analysis(response: Any, role: Literal["user", "assistant"]) -> Analys
 
 def _create_tool_guardrail(
     guardrail_type: str,
-    hiddenlayer_params: HiddenlayerParams,
+    hiddenlayer_params: HiddenLayerParams,
+    client: AsyncHiddenLayer | None = None,
 ) -> Callable:
     """Create a generic tool-level guardrail wrapper.
 
     Args:
         guardrail_type: "input" (before tool execution) or "output" (after tool execution)
         hiddenlayer_params: HiddenLayer configuration parameters
+        client: Optional AsyncHiddenLayer client instance
 
     Returns:
         Tool guardrail function decorated with @tool_input_guardrail or @tool_output_guardrail
@@ -142,7 +154,7 @@ def _create_tool_guardrail(
                 }
             )
 
-            analysis = await _analyze_content(check_data, "user", hiddenlayer_params)
+            analysis = await _analyze_content(check_data, "user", hiddenlayer_params, client)
 
             if analysis.evaluation and analysis.evaluation.action == HiddenlayerActions.BLOCK:
                 return ToolGuardrailFunctionOutput.raise_exception(
@@ -167,7 +179,7 @@ def _create_tool_guardrail(
                 }
             )
 
-            analysis = await _analyze_content(check_data, "assistant", hiddenlayer_params)
+            analysis = await _analyze_content(check_data, "user", hiddenlayer_params, client)
 
             if analysis.evaluation and analysis.evaluation.action == HiddenlayerActions.BLOCK:
                 return ToolGuardrailFunctionOutput.raise_exception(
@@ -181,13 +193,15 @@ def _create_tool_guardrail(
 
 def _create_input_output_guardrail(
     guardrail_type: str,
-    hiddenlayer_params: HiddenlayerParams,
+    hiddenlayer_params: HiddenLayerParams,
+    client: AsyncHiddenLayer | None = None,
 ):
     """Create an input or output guardrail with HiddenLayer parameters.
 
     Args:
         guardrail_type: "input" or "output" to determine which guardrail to create
         hiddenlayer_params: HiddenLayer configuration parameters
+        client: Optional AsyncHiddenLayer client instance
 
     Returns:
         Guardrail function decorated with @input_guardrail or @output_guardrail
@@ -198,10 +212,9 @@ def _create_input_output_guardrail(
         async def hiddenlayer_input_guardrail(
             ctx: RunContextWrapper[None], agent: OpenAIAgent, input: str | list[TResponseInputItem]
         ) -> GuardrailFunctionOutput:
-            # Extract content from string or list (list is hit during streaming)
             content = input if isinstance(input, str) else input[0]["content"]
 
-            response = await _analyze_content(content, "user", hiddenlayer_params)
+            response = await _analyze_content(content, "user", hiddenlayer_params, client)
             result = _parse_analysis(response, "user")
 
             return GuardrailFunctionOutput(
@@ -217,7 +230,7 @@ def _create_input_output_guardrail(
         async def hiddenlayer_output_guardrail(
             ctx: RunContextWrapper[None], agent: OpenAIAgent, output: str | list[TResponseInputItem]
         ) -> GuardrailFunctionOutput:
-            response = await _analyze_content(str(output), "assistant", hiddenlayer_params)
+            response = await _analyze_content(str(output), "assistant", hiddenlayer_params, client)
             result = _parse_analysis(response, "assistant")
 
             return GuardrailFunctionOutput(
@@ -245,7 +258,82 @@ def _attach_guardrail_to_tools(
     for tool in tools:
         if not hasattr(tool, attr_name) or getattr(tool, attr_name) is None:
             setattr(tool, attr_name, [])
-        getattr(tool, attr_name).append(guardrail)
+
+        # Check if this guardrail is already attached (idempotency)
+        existing_guardrails = getattr(tool, attr_name)
+        if guardrail not in existing_guardrails:
+            existing_guardrails.append(guardrail)
+
+
+def _wrap_mcp_tools_with_guardrails(
+    agent: Any,  # agents.Agent type
+    tool_input_guardrail: Callable,
+    tool_output_guardrail: Callable,
+) -> Any:
+    """Wrap agent's get_mcp_tools method to attach guardrails to MCP tools.
+
+    Uses defensive monkey patching to gracefully handle OpenAI SDK changes.
+    If the method signature changes or doesn't exist, logs a warning and
+    returns the agent unchanged (MCP tools won't have guardrails but won't crash).
+
+    MCP tools are discovered dynamically at runtime, so we intercept the
+    get_mcp_tools() method to attach guardrails after discovery but before
+    tool execution.
+
+    Args:
+        agent: The OpenAI Agent instance to wrap
+        tool_input_guardrail: Input guardrail to attach to MCP tools
+        tool_output_guardrail: Output guardrail to attach to MCP tools
+
+    Returns:
+        The same agent instance, with wrapped get_mcp_tools if successful
+    """
+
+    if not hasattr(agent, "get_mcp_tools"):
+        logger.warning(
+            "Agent does not have 'get_mcp_tools' method. "
+            "MCP tools will not have guardrails attached. "
+            "This may indicate an OpenAI SDK version incompatibility."
+        )
+        return agent
+
+    original_get_mcp_tools = agent.get_mcp_tools
+
+    # safe wrap the mcp tools function so that if something fails, we don't crash the app
+    async def get_mcp_tools_with_guardrails(run_context):
+        try:
+            mcp_tools = await original_get_mcp_tools(run_context)
+
+            if not isinstance(mcp_tools, list):
+                logger.warning(
+                    f"Agent.get_mcp_tools returned {type(mcp_tools)}, expected list. "
+                    "Signature may have changed. Returning tools without guardrails."
+                )
+                return mcp_tools
+
+            _attach_guardrail_to_tools(mcp_tools, tool_input_guardrail, "input")
+            _attach_guardrail_to_tools(mcp_tools, tool_output_guardrail, "output")
+
+            return mcp_tools
+
+        except TypeError as e:
+            logger.error(
+                f"Failed to call Agent.get_mcp_tools - signature may have changed: {e}. "
+                "MCP tools will not have guardrails. Please check OpenAI SDK compatibility."
+            )
+            try:
+                return await original_get_mcp_tools()
+            except Exception:
+                return []
+
+        except Exception as e:
+            logger.error(f"Unexpected error in MCP tool guardrail wrapper: {e}. " "Falling back to original method.")
+            return await original_get_mcp_tools(run_context)
+
+    # Replace method on agent instance
+    agent.get_mcp_tools = get_mcp_tools_with_guardrails
+
+    return agent
 
 
 def _parse_model(model: str | Model | None):
@@ -258,18 +346,16 @@ def _parse_model(model: str | Model | None):
 async def _redact_content(
     content: str,
     role: Literal["user", "assistant"],
-    hiddenlayer_project_id: str | None,
-    hiddenlayer_requester_id: str,
-    model: str,
+    params: HiddenLayerParams,
+    client: AsyncHiddenLayer | None = None,
 ) -> str:
     """Shared redaction logic for both input and output.
 
     Args:
         content: The content to analyze/redact
         role: "user" for input, "assistant" for output
-        hiddenlayer_project_id: Optional HiddenLayer project ID
-        hiddenlayer_requester_id: Requester ID for HiddenLayer
-        model: Model name for HiddenLayer metadata
+        params: HiddenLayer configuration parameters
+        client: Optional AsyncHiddenLayer client instance
 
     Returns:
         Original content if clean, redacted content if modified
@@ -278,9 +364,7 @@ async def _redact_content(
         InputBlockedError: If input is blocked (role="user")
         OutputBlockedError: If output is blocked (role="assistant")
     """
-    params = HiddenlayerParams(model=model, requester_id=hiddenlayer_requester_id, project_id=hiddenlayer_project_id)
-
-    response = await _analyze_content(content, role, params)
+    response = await _analyze_content(content, role, params, client)
     result = _parse_analysis(response, role)
 
     if result.block:
@@ -294,9 +378,8 @@ async def _redact_content(
 
 async def redact_input(
     input: str,
-    hiddenlayer_project_id: str | None = None,
-    hiddenlayer_requester_id: str = "openai-agent-sdk",
-    model: str = "default",
+    hiddenlayer_params: HiddenLayerParams,
+    client: AsyncHiddenLayer | None = None,
 ) -> str:
     """Redact input through HiddenLayer before agent execution.
 
@@ -306,9 +389,8 @@ async def redact_input(
 
     Args:
         input: The user input string to analyze
-        hiddenlayer_project_id: Optional HiddenLayer project ID
-        hiddenlayer_requester_id: Requester ID for HiddenLayer
-        model: Model name for HiddenLayer metadata
+        params: Optional HiddenLayerParams for configuration. If not provided, defaults will be used.
+        client: Optional AsyncHiddenLayer client instance
 
     Returns:
         The original input if no issues, or redacted input if REDACT action
@@ -318,21 +400,20 @@ async def redact_input(
 
     Example:
         ```python
-        redacted = await redact_input(
-            user_input,
-            hiddenlayer_project_id="my-project",
-        )
+        from hiddenlayer_openai_guardrails import redact_input, HiddenLayerParams
+
+        params = HiddenLayerParams(project_id="my-project")
+        redacted = await redact_input(user_input, params=params)
         result = await Runner.run(agent, redacted)
         ```
     """
-    return await _redact_content(input, "user", hiddenlayer_project_id, hiddenlayer_requester_id, model)
+    return await _redact_content(input, "user", hiddenlayer_params, client)
 
 
 async def redact_output(
     output: str,
-    hiddenlayer_project_id: str | None = None,
-    hiddenlayer_requester_id: str = "openai-agent-sdk",
-    model: str = "default",
+    hiddenlayer_params: HiddenLayerParams,
+    client: AsyncHiddenLayer | None = None,
 ) -> str:
     """Redact agent output through HiddenLayer.
 
@@ -342,9 +423,8 @@ async def redact_output(
 
     Args:
         output: The agent output string to analyze
-        hiddenlayer_project_id: Optional HiddenLayer project ID
-        hiddenlayer_requester_id: Requester ID for HiddenLayer
-        model: Model name for HiddenLayer metadata
+        params: Optional HiddenLayerParams for configuration. If not provided, defaults will be used.
+        client: Optional AsyncHiddenLayer client instance
 
     Returns:
         The original output if no issues, or redacted output if REDACT action
@@ -354,21 +434,20 @@ async def redact_output(
 
     Example:
         ```python
+        from hiddenlayer_openai_guardrails import redact_output, HiddenLayerParams
+
         result = await Runner.run(agent, user_input)
-        redacted = await redact_output(
-            result.final_output,
-            hiddenlayer_project_id="my-project",
-        )
+        params = HiddenLayerParams(project_id="my-project")
+        redacted = await redact_output(result.final_output, params=params)
         ```
     """
-    return await _redact_content(output, "assistant", hiddenlayer_project_id, hiddenlayer_requester_id, model)
+    return await _redact_content(output, "assistant", hiddenlayer_params, client)
 
 
 async def redact_streamed_output(
     streaming_result: RunResultStreaming,
-    hiddenlayer_project_id: str | None = None,
-    hiddenlayer_requester_id: str = "openai-agent-sdk",
-    model: str = "default",
+    hiddenlayer_params: HiddenLayerParams,
+    client: AsyncHiddenLayer | None = None,
 ) -> AsyncIterator[str]:
     """Buffer streamed output, scan it, then replay events if clean.
 
@@ -379,9 +458,8 @@ async def redact_streamed_output(
 
     Args:
         streaming_result: Result from Runner.run_streamed()
-        hiddenlayer_project_id: Optional HiddenLayer project ID
-        hiddenlayer_requester_id: Requester ID for HiddenLayer
-        model: Model name for HiddenLayer metadata
+        params: Optional HiddenLayerParams for configuration. If not provided, defaults will be used.
+        client: Optional AsyncHiddenLayer client instance
 
     Yields:
         Original text deltas if clean, or redacted output if modified
@@ -391,13 +469,14 @@ async def redact_streamed_output(
 
     Example:
         ```python
-        from hiddenlayer_openai_guardrails import Agent, redact_streamed_output
+        from hiddenlayer_openai_guardrails import Agent, redact_streamed_output, HiddenLayerParams
         from agents import Runner
 
         agent = Agent(name="Assistant", instructions="Help users")
         result = Runner.run_streamed(agent, user_input)
 
-        async for chunk in redact_streamed_output(result, hiddenlayer_project_id="my-proj"):
+        params = HiddenLayerParams(project_id="my-proj")
+        async for chunk in redact_streamed_output(result, params=params):
             print(chunk, end="", flush=True)
         ```
     """
@@ -411,12 +490,7 @@ async def redact_streamed_output(
     output = str(streaming_result.final_output) if streaming_result.final_output else ""
 
     # Scan/redact using existing function (raises OutputBlockedError if blocked)
-    redacted = await redact_output(
-        output,
-        hiddenlayer_project_id=hiddenlayer_project_id,
-        hiddenlayer_requester_id=hiddenlayer_requester_id,
-        model=model,
-    )
+    redacted = await redact_output(output, hiddenlayer_params=hiddenlayer_params, client=client)
 
     # If output is clean (unchanged), replay original deltas
     if redacted == output:
@@ -447,28 +521,31 @@ class Agent:
 
     Example:
         ```python
-        from hiddenlayer_openai_guardrails import Agent, redact_input, redact_output
+        from hiddenlayer_openai_guardrails import Agent, HiddenLayerParams, redact_input, redact_output
         from agents import Runner, function_tool
 
         @function_tool
         def get_weather(location: str) -> str:
             return f"Weather in {location}: Sunny"
 
+        # Configure HiddenLayer parameters
+        params = HiddenLayerParams(project_id="my-project")
+
         agent = Agent(
             name="Weather Assistant",
             instructions="You help with weather information.",
             tools=[get_weather],
-            hiddenlayer_project_id="my-project",
+            hiddenlayer_params=params,
         )
 
         # Optional: redact sensitive content from input
-        user_input = await redact_input(raw_input, hiddenlayer_project_id="my-project")
+        user_input = await redact_input(raw_input, params=params)
 
         # Run agent - guardrails will block malicious content
         result = await Runner.run(agent, user_input)
 
         # Optional: redact sensitive content from output
-        final_output = await redact_output(result.final_output, hiddenlayer_project_id="my-project")
+        final_output = await redact_output(result.final_output, params=params)
         ```
     """
 
@@ -476,8 +553,8 @@ class Agent:
         cls,
         name: str,
         instructions: str | Callable[[Any, Any], Any] | None = None,
-        hiddenlayer_project_id: str | None = None,
-        hiddenlayer_requester_id: str = "openai-agent-sdk",
+        hiddenlayer_params: HiddenLayerParams | None = None,
+        hiddenlayer_client: AsyncHiddenLayer | None = None,
         **agent_kwargs: Any,
     ) -> Any:  # Returns agents.Agent
         """Create a new Agent instance with HiddenLayer guardrails.
@@ -487,8 +564,9 @@ class Agent:
             instructions: Agent instructions. Can be a string, a callable that dynamically
                 generates instructions, or None. If a callable, it will receive the context
                 and agent instance and must return a string.
-            hiddenlayer_project_id: Optional HiddenLayer project ID for policy configuration
-            hiddenlayer_requester_id: Requester ID for HiddenLayer tracking (default: "openai-agent-sdk")
+            hiddenlayer_params: Optional HiddenLayerParams object for configuration. If not provided,
+                defaults will be used.
+            hiddenlayer_client: Optional AsyncHiddenLayer client instance
             **agent_kwargs: All other arguments passed to Agent constructor (model, tools, etc.)
 
         Returns:
@@ -510,22 +588,37 @@ class Agent:
 
         model = _parse_model(model)
 
-        hiddenlayer_params = HiddenlayerParams(
-            project_id=hiddenlayer_project_id, requester_id=hiddenlayer_requester_id, model=model
-        )
-        tool_input_gr = _create_tool_guardrail("input", hiddenlayer_params)
-        tool_output_gr = _create_tool_guardrail("output", hiddenlayer_params)
+        # Use provided params or create defaults
+        if hiddenlayer_params is None:
+            hiddenlayer_params = HiddenLayerParams(model=model)
+
+        if not hiddenlayer_params.model:
+            hiddenlayer_params.model = model
+
+        tool_input_gr = _create_tool_guardrail("input", hiddenlayer_params, hiddenlayer_client)
+        tool_output_gr = _create_tool_guardrail("output", hiddenlayer_params, hiddenlayer_client)
         _attach_guardrail_to_tools(tools, tool_input_gr, "input")
         _attach_guardrail_to_tools(tools, tool_output_gr, "output")
 
         # Create input/output guardrails with HiddenLayer params
-        input_gr: InputGuardrail = _create_input_output_guardrail("input", hiddenlayer_params)
-        output_gr: OutputGuardrail = _create_input_output_guardrail("output", hiddenlayer_params)
+        input_gr: InputGuardrail = _create_input_output_guardrail("input", hiddenlayer_params, hiddenlayer_client)
+        output_gr: OutputGuardrail = _create_input_output_guardrail("output", hiddenlayer_params, hiddenlayer_client)
 
-        return OpenAIAgent(
+        # Create the base agent with guardrails
+        openai_agent = OpenAIAgent(
             name=name,
             instructions=instructions,
             input_guardrails=[input_gr],
             output_guardrails=[output_gr],
             **agent_kwargs,
         )
+
+        # If MCP servers are provided, wrap get_mcp_tools to attach guardrails
+        if agent_kwargs.get("mcp_servers"):
+            openai_agent = _wrap_mcp_tools_with_guardrails(
+                openai_agent,
+                tool_input_gr,
+                tool_output_gr,
+            )
+
+        return openai_agent
