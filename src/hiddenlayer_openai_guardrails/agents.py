@@ -1,3 +1,4 @@
+from openai.types.realtime.input_audio_buffer_timeout_triggered import InputAudioBufferTimeoutTriggered
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, AsyncIterator, Callable, Literal
@@ -146,13 +147,25 @@ def _create_tool_guardrail(
         @tool_input_guardrail
         async def tool_input_gr(data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
             """Check tool call before execution."""
+            # The tool input guardrail data doesn't have tool description but that can be an attack vector
+            # We get the current tool here by filtering all tools and then parse the description where possible
+            tools = await data.agent.get_all_tools(data.context)
+
+            curr_tool = None
+            for tool in tools:
+                if tool.name == data.context.tool_name:
+                    curr_tool = tool
+
             check_data = json.dumps(
                 {
                     "tool_name": data.context.tool_name,
+                    "tool_description": curr_tool.description if hasattr(curr_tool, "description") else "",
                     "arguments": data.context.tool_arguments,
                     "call_id": getattr(data.context, "tool_call_id", None),
                 }
             )
+
+            print(check_data)
 
             analysis = await _analyze_content(check_data, "user", hiddenlayer_params, client)
 
