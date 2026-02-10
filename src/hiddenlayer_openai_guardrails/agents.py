@@ -36,7 +36,7 @@ class HiddenLayerParams(BaseModel):
 
     model: str | None = None
     project_id: str | None = os.getenv("HIDDENLAYER_PROJECT_ID")
-    requester_id: str = "hiddenlayer-openai-integration"
+    requester_id: str = os.getenv("HIDDENLAYER_REQUESTER_ID", "hiddenlayer-openai-integration")
 
 
 class HiddenlayerActions(str, Enum):
