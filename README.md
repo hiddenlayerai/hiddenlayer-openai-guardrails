@@ -10,9 +10,29 @@ Drop-in replacement for the Agents SDK `Agent` that wires HiddenLayer guardrails
 
 ### Configuration
 
-- Set `HIDDENLAYER_CLIENT_ID` and `HIDDENLAYER_CLIENT_SECRET` in your environment so the SDK can authenticate.
+#### Environment Variables
 
-### HiddenLayerParams
+The following environment variables must be set for authentication:
+
+- `HIDDENLAYER_CLIENT_ID` - HiddenLayer API client ID (required)
+- `HIDDENLAYER_CLIENT_SECRET` - HiddenLayer API client secret (required)
+
+Optional environment variables:
+
+- `HIDDENLAYER_PROJECT_ID` - HiddenLayer project ID for policy routing
+- `HIDDENLAYER_REQUESTER_ID` - Identifier for tracking requests (default: "hiddenlayer-openai-integration")
+
+```bash
+# Required
+export HIDDENLAYER_CLIENT_ID="your-client-id"
+export HIDDENLAYER_CLIENT_SECRET="your-client-secret"
+
+# Optional
+export HIDDENLAYER_PROJECT_ID="your-project-id"
+export HIDDENLAYER_REQUESTER_ID="your-app-name"
+```
+
+#### HiddenLayerParams
 
 Configure HiddenLayer behavior using the `HiddenLayerParams` object:
 
