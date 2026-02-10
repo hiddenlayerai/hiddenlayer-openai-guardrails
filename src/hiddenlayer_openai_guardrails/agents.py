@@ -165,8 +165,6 @@ def _create_tool_guardrail(
                 }
             )
 
-            print(check_data)
-
             analysis = await _analyze_content(check_data, "user", hiddenlayer_params, client)
 
             if analysis.evaluation and analysis.evaluation.action == HiddenlayerActions.BLOCK:
