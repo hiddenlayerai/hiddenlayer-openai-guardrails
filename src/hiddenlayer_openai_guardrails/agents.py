@@ -19,6 +19,7 @@ from agents import (
     tool_output_guardrail,
 )
 import agents
+import os
 from agents.guardrail import input_guardrail, InputGuardrail, OutputGuardrail
 from agents.result import RunResultStreaming
 
@@ -34,7 +35,7 @@ class HiddenLayerParams(BaseModel):
     """HiddenLayer request metadata and policy routing parameters."""
 
     model: str | None = None
-    project_id: str | None = None
+    project_id: str | None = os.getenv("HIDDENLAYER_PROJECT_ID")
     requester_id: str = "hiddenlayer-openai-integration"
 
 
