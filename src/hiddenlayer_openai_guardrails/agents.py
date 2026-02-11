@@ -1,4 +1,3 @@
-import asyncio
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, AsyncIterator, Callable, Literal
@@ -29,7 +28,6 @@ from pydantic import BaseModel
 
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
 
 
 class HiddenLayerParams(BaseModel):
@@ -652,13 +650,13 @@ class Agent:
             **agent_kwargs,
         )
 
-        # Wrap MCP tools with guardrails and scanning
-        agent = _wrap_mcp_tools_with_guardrails(
-            agent,
-            tool_input_gr,
-            tool_output_gr,
-            hiddenlayer_params,
-            hiddenlayer_client,
-        )
+        if agent_kwargs.get("mcp_servers"):
+            agent = _wrap_mcp_tools_with_guardrails(
+                agent,
+                tool_input_gr,
+                tool_output_gr,
+                hiddenlayer_params,
+                hiddenlayer_client,
+            )
 
         return agent
