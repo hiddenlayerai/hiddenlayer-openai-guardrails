@@ -1,4 +1,4 @@
-from openai.types.realtime.input_audio_buffer_timeout_triggered import InputAudioBufferTimeoutTriggered
+import asyncio
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, AsyncIterator, Callable, Literal
@@ -29,6 +29,7 @@ from pydantic import BaseModel
 
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 
 class HiddenLayerParams(BaseModel):
@@ -148,20 +149,10 @@ def _create_tool_guardrail(
         @tool_input_guardrail
         async def tool_input_gr(data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
             """Check tool call before execution."""
-            # The tool input guardrail data doesn't have tool description but that can be an attack vector
-            # We get the current tool here by filtering all tools and then parse the description where possible
-            tools = await data.agent.get_all_tools(data.context)
-
-            curr_tool = None
-            for tool in tools:
-                if tool.name == data.context.tool_name:
-                    curr_tool = tool
-
             check_data = json.dumps(
                 {
                     "tool_name": data.context.tool_name,
-                    "tool_description": curr_tool.description if hasattr(curr_tool, "description") else "",
-                    "arguments": data.context.tool_arguments,
+                    "arguments": json.loads(data.context.tool_arguments),
                     "call_id": getattr(data.context, "tool_call_id", None),
                 }
             )
@@ -177,7 +168,7 @@ def _create_tool_guardrail(
 
         return tool_input_gr
 
-    else:  # output
+    else:
 
         @tool_output_guardrail
         async def tool_output_gr(data: ToolOutputGuardrailData) -> ToolGuardrailFunctionOutput:
@@ -185,7 +176,7 @@ def _create_tool_guardrail(
             check_data = json.dumps(
                 {
                     "tool_name": data.context.tool_name,
-                    "arguments": data.context.tool_arguments,
+                    "arguments": json.loads(data.context.tool_arguments),
                     "output": str(data.output),
                     "call_id": getattr(data.context, "tool_call_id", None),
                 }
@@ -253,6 +244,45 @@ def _create_input_output_guardrail(
         return hiddenlayer_output_guardrail
 
 
+async def _scan_tool_definition(
+    tool: Any,
+    hiddenlayer_params: HiddenLayerParams,
+    client: AsyncHiddenLayer | None = None,
+) -> None:
+    """Scan a tool's definition for security issues at registration time.
+
+    Analyzes the tool's name, description, and parameters through HiddenLayer
+    to detect potentially malicious or violating content before the tool is ever called.
+
+    Args:
+        tool: The tool object to scan (must have name attribute)
+        hiddenlayer_params: HiddenLayer configuration parameters
+        client: Optional AsyncHiddenLayer client instance
+
+    Raises:
+        InputBlockedError: If the tool definition violates policy
+    """
+    tool_data = {
+        "tool_name": tool.name if hasattr(tool, "name") else str(tool),
+        "tool_description": getattr(tool, "description", ""),
+    }
+
+    # Add params schema if available
+    if hasattr(tool, "params_json_schema"):
+        tool_data["params_schema"] = tool.params_json_schema
+
+    check_data = json.dumps(tool_data)
+
+    analysis = await _analyze_content(check_data, "user", hiddenlayer_params, client)
+
+    if analysis.evaluation and analysis.evaluation.action == HiddenlayerActions.BLOCK:
+        logger.error(
+            f"Tool '{tool_data['tool_name']}' blocked at registration: violates policy. "
+            "Tool will not be available for use."
+        )
+        raise InputBlockedError(f"Tool '{tool_data['tool_name']}' registration blocked by HiddenLayer policy")
+
+
 def _attach_guardrail_to_tools(
     tools: list[Any],
     guardrail: Callable,
@@ -278,24 +308,28 @@ def _attach_guardrail_to_tools(
 
 
 def _wrap_mcp_tools_with_guardrails(
-    agent: Any,  # agents.Agent type
+    agent: agents.Agent,
     tool_input_guardrail: Callable,
     tool_output_guardrail: Callable,
+    hiddenlayer_params: HiddenLayerParams,
+    hiddenlayer_client: AsyncHiddenLayer | None = None,
 ) -> Any:
-    """Wrap agent's get_mcp_tools method to attach guardrails to MCP tools.
+    """Wrap agent's get_mcp_tools method to scan and attach guardrails to MCP tools.
 
     Uses defensive monkey patching to gracefully handle OpenAI SDK changes.
     If the method signature changes or doesn't exist, logs a warning and
     returns the agent unchanged (MCP tools won't have guardrails but won't crash).
 
     MCP tools are discovered dynamically at runtime, so we intercept the
-    get_mcp_tools() method to attach guardrails after discovery but before
+    get_mcp_tools() method to scan and attach guardrails after discovery but before
     tool execution.
 
     Args:
         agent: The OpenAI Agent instance to wrap
         tool_input_guardrail: Input guardrail to attach to MCP tools
         tool_output_guardrail: Output guardrail to attach to MCP tools
+        hiddenlayer_params: HiddenLayer configuration parameters
+        hiddenlayer_client: Optional AsyncHiddenLayer client instance
 
     Returns:
         The same agent instance, with wrapped get_mcp_tools if successful
@@ -311,7 +345,6 @@ def _wrap_mcp_tools_with_guardrails(
 
     original_get_mcp_tools = agent.get_mcp_tools
 
-    # safe wrap the mcp tools function so that if something fails, we don't crash the app
     async def get_mcp_tools_with_guardrails(run_context):
         try:
             mcp_tools = await original_get_mcp_tools(run_context)
@@ -323,20 +356,14 @@ def _wrap_mcp_tools_with_guardrails(
                 )
                 return mcp_tools
 
+            # Scan each MCP tool definition for security issues
+            for tool in mcp_tools:
+                await _scan_tool_definition(tool, hiddenlayer_params, hiddenlayer_client)
+
             _attach_guardrail_to_tools(mcp_tools, tool_input_guardrail, "input")
             _attach_guardrail_to_tools(mcp_tools, tool_output_guardrail, "output")
 
             return mcp_tools
-
-        except TypeError as e:
-            logger.error(
-                f"Failed to call Agent.get_mcp_tools - signature may have changed: {e}. "
-                "MCP tools will not have guardrails. Please check OpenAI SDK compatibility."
-            )
-            try:
-                return await original_get_mcp_tools()
-            except Exception:
-                return []
 
         except Exception as e:
             logger.error(f"Unexpected error in MCP tool guardrail wrapper: {e}. " "Falling back to original method.")
@@ -617,7 +644,7 @@ class Agent:
         output_gr: OutputGuardrail = _create_input_output_guardrail("output", hiddenlayer_params, hiddenlayer_client)
 
         # Create the base agent with guardrails
-        openai_agent = OpenAIAgent(
+        agent = OpenAIAgent(
             name=name,
             instructions=instructions,
             input_guardrails=[input_gr],
@@ -625,12 +652,13 @@ class Agent:
             **agent_kwargs,
         )
 
-        # If MCP servers are provided, wrap get_mcp_tools to attach guardrails
-        if agent_kwargs.get("mcp_servers"):
-            openai_agent = _wrap_mcp_tools_with_guardrails(
-                openai_agent,
-                tool_input_gr,
-                tool_output_gr,
-            )
+        # Wrap MCP tools with guardrails and scanning
+        agent = _wrap_mcp_tools_with_guardrails(
+            agent,
+            tool_input_gr,
+            tool_output_gr,
+            hiddenlayer_params,
+            hiddenlayer_client,
+        )
 
-        return openai_agent
+        return agent
