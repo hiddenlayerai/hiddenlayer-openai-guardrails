@@ -156,6 +156,14 @@ async for chunk in redact_streamed_output(result, hiddenlayer_params=params):
     print(chunk, end="", flush=True)
 ```
 
+### Capability Matrix
+
+|                           | Alert | Block | Redact |
+|---------------------------|:-----:|:-----:|:------:|
+| Input Guardrails          |   ✅  |   ✅  |   ✅   |
+| Output Guardrails         |   ✅  |   ✅  |   ✅   |
+| Streaming Output Guardrails |  ❌  |   ✅  |   ✅   |
+
 ### How it works
 
 - `hiddenlayer_openai_guardrails.agents.Agent` returns a regular `agents.Agent` configured with:
