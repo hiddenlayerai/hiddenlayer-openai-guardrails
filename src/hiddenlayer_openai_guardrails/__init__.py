@@ -6,6 +6,7 @@ from hiddenlayer_openai_guardrails.agents import (
     redact_input,
     redact_output,
     redact_streamed_output,
+    scan_streamed_output,
 )
 
 __all__ = [
@@ -16,4 +17,5 @@ __all__ = [
     "redact_input",
     "redact_output",
     "redact_streamed_output",
+    "scan_streamed_output",
 ]

@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, AsyncIterator, Callable, Literal
+import asyncio
 import json
 import logging
 
@@ -21,6 +22,7 @@ import agents
 import os
 from agents.guardrail import input_guardrail, InputGuardrail, OutputGuardrail
 from agents.result import RunResultStreaming
+from agents.stream_events import StreamEvent
 
 from agents.models.interface import Model
 from hiddenlayer import AsyncHiddenLayer
@@ -536,6 +538,151 @@ async def redact_streamed_output(
     else:
         # Output was redacted, yield the redacted version
         yield redacted
+
+
+async def scan_streamed_output(
+    streaming_result: RunResultStreaming,
+    hiddenlayer_params: HiddenLayerParams,
+    client: AsyncHiddenLayer | None = None,
+    threshold: int = 0,
+    overlap: int = 0,
+) -> AsyncIterator[StreamEvent]:
+    """Yield streaming events immediately while submitting scans in the background.
+
+    Buffers events up to a threshold count, then fires off a non-blocking
+    HiddenLayer scan for the accumulated text and yields the buffered events.
+    When threshold is 0 (default) all events are collected before a single
+    scan is submitted.
+
+    The ``overlap`` parameter controls how many events from the end of each
+    batch are re-included in the next batch's scan text so that attacks
+    spanning a batch boundary can still be detected.
+
+    Scans are submitted as background asyncio tasks and do **not** block
+    the event stream.  Any scan that returns a ``BLOCK`` verdict will raise
+    ``OutputBlockedError`` when the generator is next advanced.
+
+    Args:
+        streaming_result: Result from ``Runner.run_streamed()``.
+        hiddenlayer_params: HiddenLayer configuration parameters.
+        client: Optional ``AsyncHiddenLayer`` client instance.
+        threshold: Number of events to buffer before submitting a scan.
+            ``0`` means scan once after the stream ends (default).
+        overlap: Number of events from the end of one batch to include at
+            the start of the next batch's scan for cross-boundary detection.
+            Defaults to ``0`` (no overlap).
+
+    Yields:
+        ``StreamEvent`` objects from the underlying stream.
+
+    Raises:
+        OutputBlockedError: If any background scan returns a BLOCK action.
+
+    Example:
+        ```python
+        from hiddenlayer_openai_guardrails import Agent, scan_streamed_output, HiddenLayerParams
+        from agents import Runner
+
+        agent = Agent(name="Assistant", instructions="Help users")
+        result = Runner.run_streamed(agent, user_input)
+
+        params = HiddenLayerParams(project_id="my-proj")
+
+        # Scan every 50 events with 5 event overlap between scans
+        async for event in scan_streamed_output(result, params, threshold=50, overlap=5):
+            print(event)
+        ```
+    """
+    if overlap < 0:
+        raise ValueError("overlap must be >= 0")
+    if threshold < 0:
+        raise ValueError("threshold must be >= 0")
+    if threshold > 0 and overlap >= threshold:
+        raise ValueError("overlap must be less than threshold")
+
+    scan_tasks: list[asyncio.Task[Any]] = []
+    overlap_events: list[StreamEvent] = []
+
+    def _text_from_events(events: list[StreamEvent]) -> str:
+        """Extract concatenated text content from a list of stream events."""
+        parts: list[str] = []
+        for ev in events:
+            if ev.type == "raw_response_event":
+                delta = getattr(ev.data, "delta", None)
+                if delta:
+                    parts.append(delta)
+        return "".join(parts)
+
+    def _submit_scan(text: str) -> None:
+        """Fire-and-forget a scan task for *text*."""
+        if not text:
+            return
+
+        async def _do_scan(content: str) -> None:
+            response = await _analyze_content(content, "assistant", hiddenlayer_params, client)
+            result = _parse_analysis(response, "assistant")
+            if result.block:
+                raise OutputBlockedError("Output blocked by HiddenLayer.")
+
+        scan_tasks.append(asyncio.create_task(_do_scan(text)))
+
+    def _check_scan_failures() -> None:
+        """Raise immediately if any completed scan returned BLOCK."""
+        for task in scan_tasks:
+            if task.done() and not task.cancelled():
+                exc = task.exception()
+                if exc is not None:
+                    raise exc
+
+    if threshold == 0:
+        # Collect all events, scan once at end, then yield everything.
+        all_events: list[StreamEvent] = []
+        async for event in streaming_result.stream_events():
+            all_events.append(event)
+
+        text = _text_from_events(all_events)
+        _submit_scan(text)
+
+        for event in all_events:
+            _check_scan_failures()
+            yield event
+
+    else:
+        buffer: list[StreamEvent] = []
+
+        async for event in streaming_result.stream_events():
+            buffer.append(event)
+
+            if len(buffer) >= threshold:
+                # Build scan text: overlap from previous batch + current batch
+                scan_events = overlap_events + buffer
+                text = _text_from_events(scan_events)
+                _submit_scan(text)
+
+                # Save overlap for next batch
+                overlap_events = buffer[-overlap:] if overlap > 0 else []
+
+                # Yield all buffered events
+                for ev in buffer:
+                    _check_scan_failures()
+                    yield ev
+
+                buffer = []
+
+        # Handle remaining events in the buffer
+        if buffer:
+            scan_events = overlap_events + buffer
+            text = _text_from_events(scan_events)
+            _submit_scan(text)
+
+            for ev in buffer:
+                _check_scan_failures()
+                yield ev
+
+    # Wait for all outstanding scans to complete and check for failures
+    if scan_tasks:
+        await asyncio.gather(*scan_tasks, return_exceptions=True)
+        _check_scan_failures()
 
 
 class Agent:

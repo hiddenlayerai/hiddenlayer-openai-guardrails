@@ -14,6 +14,7 @@ from hiddenlayer_openai_guardrails import (
     redact_input,
     redact_output,
     redact_streamed_output,
+    scan_streamed_output,
 )
 from hiddenlayer_openai_guardrails.agents import _parse_model
 
@@ -83,6 +84,7 @@ async def test_hiddenlayer_guardrails_malicious():
 
 @pytest.mark.asyncio
 async def test_hiddenlayer_guardrails_malicious_streaming():
+    # Create agent with guardrails automatically configured
     agent = Agent(
         name="Customer support agent",
         instructions="You are a customer support agent. You help customers with their questions.",
@@ -105,15 +107,19 @@ async def test_hiddenlayer_guardrails_with_redact_input():
         model="gpt-4o-mini",
     )
 
+    # Use redact_input to pre-process the input
     redacted = await redact_input(REDACT_INPUT, hiddenlayer_params=HiddenLayerParams(model="gpt-4o-mini"))
 
+    # The redacted input should contain REDACTED markers
     assert "REDACTED" in redacted or redacted != REDACT_INPUT
 
+    # Run agent with the redacted input
     result = await Runner.run(agent, redacted, run_config=RunConfig(tracing_disabled=True))
 
-    assert "redacted" in result.final_output.lower()
+    assert "REDACTED" in result.final_output
 
 
+# Tests for _parse_model
 def test_parse_model_none_returns_default():
     result = _parse_model(None)
     assert result == models.get_default_model()
@@ -129,6 +135,7 @@ def test_parse_model_empty_string_returns_default():
     assert result == models.get_default_model()
 
 
+# Tests for redact_input
 @pytest.mark.asyncio
 async def test_redact_input_benign_returns_unchanged(hiddenlayer_params):
     """Benign input should be returned unchanged."""
@@ -141,6 +148,7 @@ async def test_redact_input_benign_returns_unchanged(hiddenlayer_params):
 async def test_redact_input_redact_returns_modified(hiddenlayer_params):
     """Input triggering REDACT should return modified content."""
     result = await redact_input(REDACT_INPUT, hiddenlayer_params=hiddenlayer_params)
+    # The result should contain redacted markers or be different from input
     assert "REDACTED" in result
 
 
@@ -151,6 +159,7 @@ async def test_redact_input_block_raises_exception(hiddenlayer_params):
         await redact_input(MALICIOUS_INPUT, hiddenlayer_params=hiddenlayer_params)
 
 
+# Tests for redact_output
 @pytest.mark.asyncio
 async def test_redact_output_benign_returns_unchanged(hiddenlayer_params):
     """Benign output should be returned unchanged."""
@@ -162,11 +171,14 @@ async def test_redact_output_benign_returns_unchanged(hiddenlayer_params):
 @pytest.mark.asyncio
 async def test_redact_output_with_sensitive_data(hiddenlayer_params):
     """Output with sensitive data should be redacted."""
+    # Use the same sensitive data pattern as REDACT_INPUT
     sensitive_output = "Here is the invoice summary: IBAN: IE29 AIBK 9311 5212 3456 78"
     result = await redact_output(sensitive_output, hiddenlayer_params=hiddenlayer_params)
+    # Output should contain REDACTED markers
     assert "REDACTED" in result
 
 
+# Tests for redact_streamed_output
 @pytest.mark.asyncio
 async def test_redact_streamed_output_with_redaction(hiddenlayer_params):
     """Streamed output with sensitive data should be redacted."""
@@ -178,13 +190,37 @@ async def test_redact_streamed_output_with_redaction(hiddenlayer_params):
 
     result = Runner.run_streamed(agent, REDACT_INPUT, run_config=RunConfig(tracing_disabled=True))
 
+    # Collect all chunks
     chunks = []
     async for chunk in redact_streamed_output(result, hiddenlayer_params=hiddenlayer_params):
         chunks.append(chunk)
 
+    # Should have at least one chunk with content
     assert len(chunks) > 0
     full_output = "".join(chunks)
+    # Output should contain REDACTED markers since input has sensitive data
     assert "REDACTED" in full_output
+
+
+@pytest.mark.asyncio
+async def test_hiddenlayer_mcp():
+    from agents import Runner
+    from agents.mcp import MCPServerManager, MCPServerStreamableHttp
+
+    servers = [
+        MCPServerStreamableHttp(name="calculator", params={"url": "http://localhost:8000/mcp"}),
+    ]
+
+    async with MCPServerManager(servers) as manager:
+        agent = Agent(
+            name="Haiku agent",
+            instructions="use the calculator to answer math questions.",
+            model="gpt-4o-mini",
+            mcp_servers=manager.active_servers,
+        )
+
+        result = await Runner.run(agent, "What's 2+2", run_config=RunConfig(tracing_disabled=True))
+        print(result.final_output)
 
 
 @pytest.mark.asyncio
@@ -205,12 +241,16 @@ async def test_mcp_guardrails_attached_to_tools():
             mcp_servers=manager.active_servers,
         )
 
+        # Create a mock run context to call get_mcp_tools
         mock_context = MagicMock()
 
+        # Call get_mcp_tools to trigger guardrail attachment
         mcp_tools = await agent.get_mcp_tools(mock_context)
 
+        # Verify tools were returned
         assert isinstance(mcp_tools, list)
 
+        # If tools exist, verify guardrails are attached
         if len(mcp_tools) > 0:
             for tool in mcp_tools:
                 assert hasattr(tool, "tool_input_guardrails"), f"Tool {tool} missing tool_input_guardrails"
@@ -238,6 +278,8 @@ async def test_mcp_tools_block_malicious_input():
             mcp_servers=manager.active_servers,
         )
 
+        # Try to inject malicious prompt via calculator tool
+        # This should be caught by either input guardrail or tool guardrails
         with pytest.raises(
             (agents.exceptions.ToolInputGuardrailTripwireTriggered, agents.exceptions.InputGuardrailTripwireTriggered)
         ):
@@ -272,11 +314,13 @@ async def test_mixed_regular_and_mcp_tools():
             mcp_servers=manager.active_servers,
         )
 
+        # Verify local tool has guardrails
         assert hasattr(local_tool, "tool_input_guardrails")
         assert hasattr(local_tool, "tool_output_guardrails")
         assert len(local_tool.tool_input_guardrails) > 0
         assert len(local_tool.tool_output_guardrails) > 0
 
+        # Verify MCP tools have guardrails
         mock_context = MagicMock()
         mcp_tools = await agent.get_mcp_tools(mock_context)
 
@@ -308,13 +352,95 @@ async def test_mcp_guardrails_idempotency():
 
         mock_context = MagicMock()
 
+        # Call get_mcp_tools multiple times
         mcp_tools_1 = await agent.get_mcp_tools(mock_context)
         mcp_tools_2 = await agent.get_mcp_tools(mock_context)
 
+        # Verify guardrails weren't duplicated
         if len(mcp_tools_1) > 0:
             for tool in mcp_tools_1:
                 input_count = len(tool.tool_input_guardrails)
                 output_count = len(tool.tool_output_guardrails)
 
+                # Should have exactly 1 input and 1 output guardrail
+                # (idempotency check prevents duplicates)
                 assert input_count == 1, f"Expected 1 input guardrail, got {input_count}"
                 assert output_count == 1, f"Expected 1 output guardrail, got {output_count}"
+
+
+# Tests for scan_streamed_output
+@pytest.mark.asyncio
+async def test_scan_streamed_output_benign_default(hiddenlayer_params):
+    """Benign streamed output with default threshold (all events buffered, single scan)."""
+    agent = Agent(
+        name="Test agent",
+        model="gpt-4o-mini",
+        instructions="Respond briefly.",
+    )
+
+    result = Runner.run_streamed(agent, "What is 2+2?", run_config=RunConfig(tracing_disabled=True))
+
+    events = []
+    async for event in scan_streamed_output(result, hiddenlayer_params=hiddenlayer_params):
+        events.append(event)
+
+    assert len(events) > 0
+
+
+@pytest.mark.asyncio
+async def test_scan_streamed_output_benign_with_threshold(hiddenlayer_params):
+    """Benign streamed output with a small threshold triggers multiple scans."""
+    agent = Agent(
+        name="Test agent",
+        model="gpt-4o-mini",
+        instructions="Respond briefly.",
+    )
+
+    result = Runner.run_streamed(agent, "What is 2+2?", run_config=RunConfig(tracing_disabled=True))
+
+    events = []
+    async for event in scan_streamed_output(result, hiddenlayer_params=hiddenlayer_params, threshold=5):
+        events.append(event)
+
+    assert len(events) > 0
+
+
+@pytest.mark.asyncio
+async def test_scan_streamed_output_with_overlap(hiddenlayer_params):
+    """Benign streamed output with threshold and overlap."""
+    agent = Agent(
+        name="Test agent",
+        model="gpt-4o-mini",
+        instructions="Respond briefly.",
+    )
+
+    result = Runner.run_streamed(agent, "What is 2+2?", run_config=RunConfig(tracing_disabled=True))
+
+    events = []
+    async for event in scan_streamed_output(
+        result, hiddenlayer_params=hiddenlayer_params, threshold=5, overlap=2
+    ):
+        events.append(event)
+
+    assert len(events) > 0
+
+
+@pytest.mark.asyncio
+async def test_scan_streamed_output_invalid_params():
+    """Invalid parameter combinations should raise ValueError."""
+    params = HiddenLayerParams(model="gpt-4o-mini")
+
+    # overlap must be >= 0
+    with pytest.raises(ValueError, match="overlap must be >= 0"):
+        async for _ in scan_streamed_output(None, hiddenlayer_params=params, overlap=-1):
+            pass
+
+    # threshold must be >= 0
+    with pytest.raises(ValueError, match="threshold must be >= 0"):
+        async for _ in scan_streamed_output(None, hiddenlayer_params=params, threshold=-1):
+            pass
+
+    # overlap must be less than threshold
+    with pytest.raises(ValueError, match="overlap must be less than threshold"):
+        async for _ in scan_streamed_output(None, hiddenlayer_params=params, threshold=5, overlap=5):
+            pass
