@@ -685,6 +685,71 @@ async def scan_streamed_output(
         _check_scan_failures()
 
 
+async def alert_streamed_output(
+    streaming_result: RunResultStreaming,
+    hiddenlayer_params: HiddenLayerParams,
+    client: AsyncHiddenLayer | None = None,
+) -> AsyncIterator[StreamEvent]:
+    """Yield streaming events immediately, then scan the complete output for alerting.
+
+    Events are yielded to the caller as they arrive with no buffering delay.
+    Once the stream finishes, the accumulated text is submitted to HiddenLayer
+    for analysis.  The result is logged but never blocks or raises — this
+    function is intended purely for alerting / observability.
+
+    Args:
+        streaming_result: Result from ``Runner.run_streamed()``.
+        hiddenlayer_params: HiddenLayer configuration parameters.
+        client: Optional ``AsyncHiddenLayer`` client instance.
+
+    Yields:
+        ``StreamEvent`` objects from the underlying stream.
+
+    Example:
+        ```python
+        from hiddenlayer_openai_guardrails import Agent, alert_streamed_output, HiddenLayerParams
+        from agents import Runner
+
+        agent = Agent(name="Assistant", instructions="Help users")
+        result = Runner.run_streamed(agent, user_input)
+
+        params = HiddenLayerParams(project_id="my-proj")
+        async for event in alert_streamed_output(result, params):
+            print(event)
+        ```
+    """
+    buffer: list[StreamEvent] = []
+
+    async for event in streaming_result.stream_events():
+        buffer.append(event)
+        yield event
+
+    # Extract text from buffered events
+    parts: list[str] = []
+    for ev in buffer:
+        if ev.type == "raw_response_event":
+            delta = getattr(ev.data, "delta", None)
+            if delta:
+                parts.append(delta)
+    text = "".join(parts)
+
+    if not text:
+        return
+
+    try:
+        response = await _analyze_content(text, "assistant", hiddenlayer_params, client)
+        result = _parse_analysis(response, "assistant")
+
+        if result.block:
+            logger.warning("HiddenLayer alert: output was flagged for blocking.")
+        elif result.redact:
+            logger.warning("HiddenLayer alert: output was flagged for redaction.")
+        else:
+            logger.debug("HiddenLayer alert: output scan clean.")
+    except Exception:
+        logger.exception("HiddenLayer alert: failed to scan streamed output.")
+
+
 class Agent:
     """Drop-in replacement for Agents SDK Agent with HiddenLayer guardrails.
 

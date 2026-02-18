@@ -11,6 +11,7 @@ from hiddenlayer_openai_guardrails import (
     HiddenLayerParams,
     InputBlockedError,
     OutputBlockedError,
+    alert_streamed_output,
     redact_input,
     redact_output,
     redact_streamed_output,
@@ -444,3 +445,41 @@ async def test_scan_streamed_output_invalid_params():
     with pytest.raises(ValueError, match="overlap must be less than threshold"):
         async for _ in scan_streamed_output(None, hiddenlayer_params=params, threshold=5, overlap=5):
             pass
+
+
+# Tests for alert_streamed_output
+@pytest.mark.asyncio
+async def test_alert_streamed_output_benign(hiddenlayer_params):
+    """Benign streamed output should yield all events and log clean scan."""
+    agent = Agent(
+        name="Test agent",
+        model="gpt-4o-mini",
+        instructions="Respond briefly.",
+    )
+
+    result = Runner.run_streamed(agent, "What is 2+2?", run_config=RunConfig(tracing_disabled=True))
+
+    events = []
+    async for event in alert_streamed_output(result, hiddenlayer_params=hiddenlayer_params):
+        events.append(event)
+
+    assert len(events) > 0
+
+
+@pytest.mark.asyncio
+async def test_alert_streamed_output_sensitive_does_not_raise(hiddenlayer_params):
+    """Sensitive streamed output should yield all events without raising."""
+    agent = Agent(
+        name="Test agent",
+        model="gpt-4o-mini",
+        instructions="Summarize the following input.",
+    )
+
+    result = Runner.run_streamed(agent, REDACT_INPUT, run_config=RunConfig(tracing_disabled=True))
+
+    events = []
+    async for event in alert_streamed_output(result, hiddenlayer_params=hiddenlayer_params):
+        events.append(event)
+
+    # Should still yield events even when content is flagged
+    assert len(events) > 0
