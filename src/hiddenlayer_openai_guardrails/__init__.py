@@ -5,7 +5,7 @@ from hiddenlayer_openai_guardrails.agents import (
     OutputBlockedError,
     redact_input,
     redact_output,
-    redact_streamed_output,
+    safe_stream,
 )
 
 __all__ = [
@@ -15,5 +15,5 @@ __all__ = [
     "OutputBlockedError",
     "redact_input",
     "redact_output",
-    "redact_streamed_output",
+    "safe_stream",
 ]

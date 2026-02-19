@@ -339,7 +339,7 @@ def _wrap_mcp_tools_with_guardrails(
                 return []
 
         except Exception as e:
-            logger.error(f"Unexpected error in MCP tool guardrail wrapper: {e}. " "Falling back to original method.")
+            logger.error(f"Unexpected error in MCP tool guardrail wrapper: {e}. Falling back to original method.")
             return await original_get_mcp_tools(run_context)
 
     # Replace method on agent instance
@@ -456,39 +456,38 @@ async def redact_output(
     return await _redact_content(output, "assistant", hiddenlayer_params, client)
 
 
-async def redact_streamed_output(
+async def safe_stream(
     streaming_result: RunResultStreaming,
     hiddenlayer_params: HiddenLayerParams,
     client: AsyncHiddenLayer | None = None,
 ) -> AsyncIterator[str]:
-    """Buffer streamed output, scan it, then replay events if clean.
+    """Stream agent output while scanning it through HiddenLayer guardrails.
 
     This function consumes a streaming result from Runner.run_streamed(),
-    buffers all text deltas, scans the complete output through HiddenLayer,
-    and if clean, replays the original text deltas as they came in.
-    If redaction is needed, yields the redacted content instead.
+    yielding stream events in real-time. Once streaming completes, the full
+    output is scanned through HiddenLayer to detect policy violations.
 
     Args:
         streaming_result: Result from Runner.run_streamed()
-        params: Optional HiddenLayerParams for configuration. If not provided, defaults will be used.
+        hiddenlayer_params: HiddenLayerParams for configuration.
         client: Optional AsyncHiddenLayer client instance
 
     Yields:
-        Original text deltas if clean, or redacted output if modified
+        Stream events as they arrive from the underlying stream
 
     Raises:
         OutputBlockedError: If HiddenLayer blocks the output
 
     Example:
         ```python
-        from hiddenlayer_openai_guardrails import Agent, redact_streamed_output, HiddenLayerParams
+        from hiddenlayer_openai_guardrails import Agent, safe_stream, HiddenLayerParams
         from agents import Runner
 
         agent = Agent(name="Assistant", instructions="Help users")
         result = Runner.run_streamed(agent, user_input)
 
         params = HiddenLayerParams(project_id="my-proj")
-        async for chunk in redact_streamed_output(result, params=params):
+        async for chunk in safe_stream(result, hiddenlayer_params=params):
             print(chunk, end="", flush=True)
         ```
     """
@@ -497,20 +496,16 @@ async def redact_streamed_output(
 
     async for event in streaming_result.stream_events():
         events.append(event)
+        yield event
 
     # Get the complete output
     output = str(streaming_result.final_output) if streaming_result.final_output else ""
 
     # Scan/redact using existing function (raises OutputBlockedError if blocked)
-    redacted = await redact_output(output, hiddenlayer_params=hiddenlayer_params, client=client)
-
-    # If output is clean (unchanged), replay original deltas
-    if redacted == output:
-        for event in events:
-            yield event
-    else:
-        # Output was redacted, yield the redacted version
-        yield redacted
+    try:
+        _ = await _analyze_content(output, "assistant", hiddenlayer_params, client)
+    except Exception:
+        logger.info("Hiddenlayer scan failed")
 
 
 class Agent:

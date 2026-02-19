@@ -134,13 +134,13 @@ except OutputBlockedError:
     print("Output was blocked by HiddenLayer")
 ```
 
-#### Redacting Streamed Output
+#### Safe Streaming Output
 
-For streaming responses, use `redact_streamed_output` to buffer, scan, and replay content:
+For streaming responses, use `safe_stream` to stream output while scanning it through HiddenLayer guardrails:
 
 ```python
 from agents import Runner
-from hiddenlayer_openai_guardrails import Agent, HiddenLayerParams, redact_streamed_output
+from hiddenlayer_openai_guardrails import Agent, HiddenLayerParams, safe_stream
 
 # Configure HiddenLayer parameters
 params = HiddenLayerParams(project_id="my-project")
@@ -152,7 +152,7 @@ agent = Agent(
 )
 result = Runner.run_streamed(agent, user_input)
 
-async for chunk in redact_streamed_output(result, hiddenlayer_params=params):
+async for chunk in safe_stream(result, hiddenlayer_params=params):
     print(chunk, end="", flush=True)
 ```
 
