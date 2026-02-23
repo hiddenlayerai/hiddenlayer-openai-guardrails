@@ -103,11 +103,11 @@ async def test_hiddenlayer_guardrails_with_redact_input():
 
     redacted = await redact_input(REDACT_INPUT, hiddenlayer_params=HiddenLayerParams(model="gpt-4o-mini"))
 
-    assert "REDACTED" in redacted or redacted != REDACT_INPUT
+    assert "IE29 AIBK 9311 5212 3456 78" not in redacted
 
     result = await Runner.run(agent, redacted, run_config=RunConfig(tracing_disabled=True))
 
-    assert "redacted" in result.final_output.lower()
+    assert "IE29 AIBK 9311 5212 3456 78" not in result.final_output
 
 
 def test_parse_model_none_returns_default():
@@ -137,7 +137,7 @@ async def test_redact_input_benign_returns_unchanged(hiddenlayer_params):
 async def test_redact_input_redact_returns_modified(hiddenlayer_params):
     """Input triggering REDACT should return modified content."""
     result = await redact_input(REDACT_INPUT, hiddenlayer_params=hiddenlayer_params)
-    assert "REDACTED" in result
+    assert "IE29 AIBK 9311 5212 3456 78" not in result
 
 
 @pytest.mark.asyncio
@@ -160,7 +160,7 @@ async def test_redact_output_with_sensitive_data(hiddenlayer_params):
     """Output with sensitive data should be redacted."""
     sensitive_output = "Here is the invoice summary: IBAN: IE29 AIBK 9311 5212 3456 78"
     result = await redact_output(sensitive_output, hiddenlayer_params=hiddenlayer_params)
-    assert "REDACTED" in result
+    assert "IE29 AIBK 9311 5212 3456 78" not in result
 
 
 @pytest.mark.asyncio
