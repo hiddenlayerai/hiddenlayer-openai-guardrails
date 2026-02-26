@@ -159,6 +159,38 @@ async for event in safe_stream(result, hiddenlayer_params=params):
 
 If HiddenLayer returns a `BLOCK` action for the final streamed output, `safe_stream` raises `OutputBlockedError` after streaming completes.
 
+#### MCP Server Tools
+
+When using [MCP servers](https://modelcontextprotocol.io/) with the Agents SDK, HiddenLayer guardrails are automatically applied to dynamically discovered MCP tools:
+
+```python
+from agents import Runner
+from agents.mcp import MCPServerStreamableHttp
+from agents.run import RunConfig
+from hiddenlayer_openai_guardrails import Agent, HiddenLayerParams
+
+servers = [
+    MCPServerStreamableHttp(name="calculator", params={"url": "http://localhost:8000/mcp"}),
+]
+
+agent = Agent(
+    name="Math agent",
+    instructions="Use the calculator to answer math questions.",
+    model="gpt-4o-mini",
+    hiddenlayer_params=HiddenLayerParams(project_id="my-project"),
+    mcp_servers=servers,
+)
+
+result = await Runner.run(
+    agent,
+    "What is 2 + 2?",
+    run_config=RunConfig(tracing_disabled=True),
+)
+print(result.final_output)
+```
+
+MCP tool definitions are scanned through HiddenLayer at discovery time. Tools that violate policy are blocked and excluded from the agent (fail-closed). Scan results are cached per tool so repeated `get_mcp_tools()` calls don't re-scan the same definitions.
+
 ### How it works
 
 - `hiddenlayer_openai_guardrails.agents.Agent` returns a regular `agents.Agent` configured with:
@@ -168,10 +200,24 @@ If HiddenLayer returns a `BLOCK` action for the final streamed output, `safe_str
 - Input guardrails scan one message per request, in order, and skip already-seen messages for the same conversation thread.
 - Tool guardrails currently enforce block-only behavior; `REDACT` actions are not applied in tool hooks.
 - Strict phase mapping is used: model-produced tool arguments scan as `output`, and tool results destined for the model scan as `input`.
+- MCP tools are scanned at discovery time — tool definitions that violate policy are excluded (fail-closed). Allowed tools receive the same input/output guardrails as regular tools. Per-tool scan results are cached so repeated discovery calls are efficient.
 
 ### Development
 
-- Run tests after installing dev deps (`pytest` and `pytest-asyncio`): `pytest tests`
+```bash
+# Install dependencies (uses uv)
+uv sync
+
+# Run unit tests (no network, mocked dependencies)
+pytest tests -m unit
+
+# Run live integration tests (requires credentials and OPENAI_API_KEY)
+RUN_LIVE_INTEGRATION_TESTS=1 pytest tests -m integration
+
+# Run all tests
+pytest tests
+```
+
 - Public API lives in `src/hiddenlayer_openai_guardrails/agents.py` (facade); implementation is split across:
   - `src/hiddenlayer_openai_guardrails/_hiddenlayer.py` (HiddenLayer client + analyze calls)
   - `src/hiddenlayer_openai_guardrails/_guardrails.py` (agent/tool/MCP guardrail wiring)
