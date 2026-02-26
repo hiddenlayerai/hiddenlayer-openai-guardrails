@@ -61,8 +61,10 @@ def _extract_thread_key(context: Any) -> str:
     return hashlib.sha256(safe_json_dumps(context).encode("utf-8")).hexdigest()
 
 
-def _scan_cache_key(phase_role: Literal["user", "assistant"], message_role: str, content: str) -> str:
-    payload = f"{phase_role}\u241f{message_role}\u241f{content}"
+def _scan_cache_key(content: str) -> str:
+    # Deduplicate by normalized content only within a conversation thread.
+    # This ensures replayed assistant outputs are not rescanned as inputs.
+    payload = content
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -81,7 +83,7 @@ async def _scan_message_once(
     thread_key = _extract_thread_key(context)
     namespace_id = id(agent) if agent is not None else (id(context) if context is not None else id(hiddenlayer_params))
     cache_bucket = _SCAN_DECISION_CACHE.setdefault((namespace_id, thread_key), {})
-    cache_key = _scan_cache_key(phase_role, message_role, normalized_content)
+    cache_key = _scan_cache_key(normalized_content)
 
     cached = cache_bucket.get(cache_key)
     if cached is not None:

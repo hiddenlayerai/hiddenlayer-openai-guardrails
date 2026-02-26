@@ -267,6 +267,31 @@ async def test_input_guardrail_dedupes_across_turns_same_conversation(monkeypatc
     ]
 
 
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_replayed_output_not_rescanned_as_input_same_thread(monkeypatch):
+    captured: list[dict[str, Any]] = []
+
+    async def fake_analyze(messages, role, *args, **kwargs):
+        captured.append({"messages": messages, "role": role})
+        return _analysis_response(action="Alert")
+
+    monkeypatch.setattr(hl_agents, "_analyze_content", fake_analyze)
+
+    agent = Agent(name="Customer support agent", instructions="You are helpful.", model="gpt-4o-mini")
+    input_guardrail = agent.input_guardrails[0]
+    output_guardrail = agent.output_guardrails[0]
+    thread_ctx = RunContextWrapper(context={"conversation_id": "thread-output-replay"})
+
+    replayed_content = "Model answer from prior turn."
+    await output_guardrail.run(thread_ctx, agent, replayed_content)
+    await input_guardrail.run(agent, [{"role": "assistant", "content": replayed_content}], thread_ctx)
+
+    assert captured == [
+        {"messages": [{"role": "assistant", "content": replayed_content}], "role": "assistant"}
+    ]
+
+
 class _OutputModel(BaseModel):
     text: str
 
