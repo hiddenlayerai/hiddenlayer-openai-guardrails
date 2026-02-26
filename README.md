@@ -136,7 +136,7 @@ except OutputBlockedError:
 
 #### Safe Streaming Output
 
-For streaming responses, use `safe_stream` to stream output while scanning it through HiddenLayer guardrails:
+For streaming responses, use `safe_stream` to stream event objects while scanning the final output through HiddenLayer guardrails:
 
 ```python
 from agents import Runner
@@ -152,18 +152,30 @@ agent = Agent(
 )
 result = Runner.run_streamed(agent, user_input)
 
-async for chunk in safe_stream(result, hiddenlayer_params=params):
-    print(chunk, end="", flush=True)
+async for event in safe_stream(result, hiddenlayer_params=params):
+    # event is an Agents SDK stream event (not plain text)
+    print(event)
 ```
+
+If HiddenLayer returns a `BLOCK` action for the final streamed output, `safe_stream` raises `OutputBlockedError` after streaming completes.
 
 ### How it works
 
 - `hiddenlayer_openai_guardrails.agents.Agent` returns a regular `agents.Agent` configured with:
   - Agent-level input/output guardrails that analyze user and assistant messages.
-  - Tool-level guardrails that inspect arguments before execution and outputs afterward.
+  - Tool-level guardrails that inspect tool arguments before execution and tool output afterward.
 - Guardrails rely on `AsyncHiddenLayer.interactions.analyze` and will raise when HiddenLayer signals a blocking action.
+- Input guardrails normalize and forward the full conversation message list so HiddenLayer sees the same message flow the model receives.
+- Tool guardrails currently enforce block-only behavior; `REDACT` actions are not applied in tool hooks.
+- Tool output scanning is sent through the output phase with assistant-role message semantics.
 
 ### Development
 
 - Run tests after installing dev deps (`pytest` and `pytest-asyncio`): `pytest tests`
-- Code lives in `src/hiddenlayer_openai_guardrails/agents.py`; tests are in `tests/test_agents.py`.
+- Public API lives in `src/hiddenlayer_openai_guardrails/agents.py` (facade); implementation is split across:
+  - `src/hiddenlayer_openai_guardrails/_hiddenlayer.py` (HiddenLayer client + analyze calls)
+  - `src/hiddenlayer_openai_guardrails/_guardrails.py` (agent/tool/MCP guardrail wiring)
+  - `src/hiddenlayer_openai_guardrails/_normalize.py` (payload normalization)
+  - `src/hiddenlayer_openai_guardrails/_analysis.py` (response parsing)
+  - `src/hiddenlayer_openai_guardrails/_redaction.py` and `src/hiddenlayer_openai_guardrails/_streaming.py`
+- Tests are in `tests/test_agents_unit.py` and `tests/test_agents_integration.py`.

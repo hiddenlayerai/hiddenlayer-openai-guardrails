@@ -8,3 +8,7 @@ wheels/
 
 # Virtual environments
 .venv
+hiddenlayer-sdk-python-3.4.0/
+hiddenlayer-sdk-python-3.3.0/
+.env
+test_rig/
