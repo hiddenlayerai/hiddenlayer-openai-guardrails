@@ -1,4 +1,5 @@
 import logging
+import hashlib
 from collections.abc import Awaitable, Callable
 from typing import Any, Literal
 
@@ -29,6 +30,73 @@ AnalyzeContent = Callable[
     Awaitable[Any],
 ]
 
+_THREAD_ID_KEYS = (
+    "conversation_id",
+    "conversationId",
+    "thread_id",
+    "threadId",
+    "session_id",
+    "sessionId",
+)
+# (agent_id, thread_key) -> {scan_key: blocked}
+_SCAN_DECISION_CACHE: dict[tuple[int, str], dict[str, bool]] = {}
+
+
+def _extract_thread_key(context: Any) -> str:
+    if context is None:
+        return "default"
+
+    if isinstance(context, dict):
+        for key in _THREAD_ID_KEYS:
+            value = context.get(key)
+            if value is not None:
+                return str(value)
+        return hashlib.sha256(safe_json_dumps(context).encode("utf-8")).hexdigest()
+
+    for key in _THREAD_ID_KEYS:
+        value = getattr(context, key, None)
+        if value is not None:
+            return str(value)
+
+    return hashlib.sha256(safe_json_dumps(context).encode("utf-8")).hexdigest()
+
+
+def _scan_cache_key(phase_role: Literal["user", "assistant"], message_role: str, content: str) -> str:
+    payload = f"{phase_role}\u241f{message_role}\u241f{content}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+async def _scan_message_once(
+    *,
+    agent: Any,
+    context: Any,
+    phase_role: Literal["user", "assistant"],
+    message_role: str,
+    content: Any,
+    hiddenlayer_params: HiddenLayerParams,
+    client: AsyncHiddenLayer | None,
+    analyze_content: AnalyzeContent,
+) -> bool:
+    normalized_content = normalize_content(content)
+    thread_key = _extract_thread_key(context)
+    namespace_id = id(agent) if agent is not None else (id(context) if context is not None else id(hiddenlayer_params))
+    cache_bucket = _SCAN_DECISION_CACHE.setdefault((namespace_id, thread_key), {})
+    cache_key = _scan_cache_key(phase_role, message_role, normalized_content)
+
+    cached = cache_bucket.get(cache_key)
+    if cached is not None:
+        return cached
+
+    analysis = await analyze_content(
+        [{"role": message_role, "content": normalized_content}],
+        phase_role,
+        hiddenlayer_params,
+        client,
+    )
+    result = parse_analysis(analysis, phase_role)
+    cache_bucket[cache_key] = result.block
+    return result.block
+
 
 def create_tool_guardrail(
     guardrail_type: str,
@@ -43,15 +111,18 @@ def create_tool_guardrail(
         @tool_input_guardrail
         async def tool_input_gr(data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
             parsed_arguments = safe_parse_tool_arguments(data.context.tool_arguments)
-            analysis = await analyze_content(
-                [{"role": "user", "content": normalize_content(parsed_arguments)}],
-                "user",
-                hiddenlayer_params,
-                client,
+            blocked = await _scan_message_once(
+                agent=data.agent,
+                context=data.context.context,
+                phase_role="assistant",
+                message_role="assistant",
+                content=parsed_arguments,
+                hiddenlayer_params=hiddenlayer_params,
+                client=client,
+                analyze_content=analyze_content,
             )
-            result = parse_analysis(analysis, "user")
 
-            if result.block:
+            if blocked:
                 return ToolGuardrailFunctionOutput.raise_exception(
                     output_info="Tool call was violative of policy and was blocked by Hiddenlayer"
                 )
@@ -62,15 +133,18 @@ def create_tool_guardrail(
 
     @tool_output_guardrail
     async def tool_output_gr(data: ToolOutputGuardrailData) -> ToolGuardrailFunctionOutput:
-        analysis = await analyze_content(
-            [{"role": "assistant", "content": normalize_content(data.output)}],
-            "assistant",
-            hiddenlayer_params,
-            client,
+        blocked = await _scan_message_once(
+            agent=data.agent,
+            context=data.context.context,
+            phase_role="user",
+            message_role="user",
+            content=data.output,
+            hiddenlayer_params=hiddenlayer_params,
+            client=client,
+            analyze_content=analyze_content,
         )
-        result = parse_analysis(analysis, "assistant")
 
-        if result.block:
+        if blocked:
             return ToolGuardrailFunctionOutput.raise_exception(
                 output_info="Tool call was violative of policy and was blocked by Hiddenlayer"
             )
@@ -94,12 +168,26 @@ def create_input_output_guardrail(
         async def hiddenlayer_input_guardrail(
             ctx: RunContextWrapper[None], agent: OpenAIAgent, input: str | list[TResponseInputItem]
         ) -> GuardrailFunctionOutput:
-            response = await analyze_content(normalize_input_messages(input), "user", hiddenlayer_params, client)
-            result = parse_analysis(response, "user")
+            for message in normalize_input_messages(input):
+                blocked = await _scan_message_once(
+                    agent=agent,
+                    context=ctx.context,
+                    phase_role="user",
+                    message_role=str(message.get("role", "user")),
+                    content=message.get("content", ""),
+                    hiddenlayer_params=hiddenlayer_params,
+                    client=client,
+                    analyze_content=analyze_content,
+                )
+                if blocked:
+                    return GuardrailFunctionOutput(
+                        output_info="Blocked by HiddenLayer.",
+                        tripwire_triggered=True,
+                    )
 
             return GuardrailFunctionOutput(
-                output_info="Blocked by HiddenLayer." if result.block else "Nothing detected.",
-                tripwire_triggered=result.block,
+                output_info="Nothing detected.",
+                tripwire_triggered=False,
             )
 
         return hiddenlayer_input_guardrail
@@ -108,17 +196,20 @@ def create_input_output_guardrail(
     async def hiddenlayer_output_guardrail(
         ctx: RunContextWrapper[None], agent: OpenAIAgent, output: Any
     ) -> GuardrailFunctionOutput:
-        response = await analyze_content(
-            [{"role": "assistant", "content": normalize_content(output)}],
-            "assistant",
-            hiddenlayer_params,
-            client,
+        blocked = await _scan_message_once(
+            agent=agent,
+            context=ctx.context,
+            phase_role="assistant",
+            message_role="assistant",
+            content=output,
+            hiddenlayer_params=hiddenlayer_params,
+            client=client,
+            analyze_content=analyze_content,
         )
-        result = parse_analysis(response, "assistant")
 
         return GuardrailFunctionOutput(
-            output_info="Blocked by HiddenLayer." if result.block else "Nothing detected.",
-            tripwire_triggered=result.block,
+            output_info="Blocked by HiddenLayer." if blocked else "Nothing detected.",
+            tripwire_triggered=blocked,
         )
 
     return hiddenlayer_output_guardrail

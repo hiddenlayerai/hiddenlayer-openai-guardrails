@@ -39,8 +39,12 @@ def require_live_env():
 @pytest.fixture(scope="module")
 def require_local_mcp_server():
     try:
-        response = httpx.get("http://127.0.0.1:8000/mcp", timeout=2.0)
-        if response.status_code not in (200, 404, 405):
+        # Probe endpoint capabilities without requiring an MCP session ID.
+        response = httpx.options(
+            "http://127.0.0.1:8000/mcp",
+            timeout=2.0,
+        )
+        if response.status_code not in (200, 204, 405):
             pytest.skip(f"MCP server returned unexpected status {response.status_code}")
     except Exception:
         pytest.skip("Local MCP server not reachable at http://127.0.0.1:8000/mcp")

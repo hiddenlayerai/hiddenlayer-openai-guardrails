@@ -1,6 +1,6 @@
 import json
 from types import SimpleNamespace
-from typing import get_type_hints
+from typing import Any, get_type_hints
 
 import agents as openai_agents
 import pytest
@@ -162,10 +162,10 @@ async def test_agent_input_guardrail_tripwire_triggers_on_block(monkeypatch):
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_input_guardrail_handles_empty_message_list(monkeypatch):
-    captured = {}
+    captured = {"calls": 0}
 
     async def fake_analyze(messages, *args, **kwargs):
-        captured["messages"] = messages
+        captured["calls"] += 1
         return _analysis_response(action="Alert")
 
     monkeypatch.setattr(hl_agents, "_analyze_content", fake_analyze)
@@ -175,16 +175,16 @@ async def test_input_guardrail_handles_empty_message_list(monkeypatch):
     result = await guardrail.run(agent, [], RunContextWrapper(context=None))
 
     assert result.output.tripwire_triggered is False
-    assert captured["messages"] == []
+    assert captured["calls"] == 0
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_input_guardrail_sends_multi_turn_and_normalizes_multipart(monkeypatch):
-    captured = {}
+    captured: list[dict[str, Any]] = []
 
-    async def fake_analyze(messages, *args, **kwargs):
-        captured["messages"] = messages
+    async def fake_analyze(messages, role, *args, **kwargs):
+        captured.append({"messages": messages, "role": role})
         return _analysis_response(action="Alert")
 
     monkeypatch.setattr(hl_agents, "_analyze_content", fake_analyze)
@@ -207,20 +207,20 @@ async def test_input_guardrail_sends_multi_turn_and_normalizes_multipart(monkeyp
         RunContextWrapper(context=None),
     )
 
-    assert captured["messages"] == [
-        {"role": "system", "content": "System instruction"},
-        {"role": "user", "content": "Please summarize this"},
-        {"role": "assistant", "content": "Prior response"},
+    assert captured == [
+        {"messages": [{"role": "system", "content": "System instruction"}], "role": "user"},
+        {"messages": [{"role": "user", "content": "Please summarize this"}], "role": "user"},
+        {"messages": [{"role": "assistant", "content": "Prior response"}], "role": "user"},
     ]
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_input_guardrail_skips_non_message_items(monkeypatch):
-    captured = {}
+    captured: list[dict[str, Any]] = []
 
-    async def fake_analyze(messages, *args, **kwargs):
-        captured["messages"] = messages
+    async def fake_analyze(messages, role, *args, **kwargs):
+        captured.append({"messages": messages, "role": role})
         return _analysis_response(action="Alert")
 
     monkeypatch.setattr(hl_agents, "_analyze_content", fake_analyze)
@@ -237,7 +237,34 @@ async def test_input_guardrail_skips_non_message_items(monkeypatch):
         RunContextWrapper(context=None),
     )
 
-    assert captured["messages"] == [{"role": "user", "content": "hello"}]
+    assert captured == [{"messages": [{"role": "user", "content": "hello"}], "role": "user"}]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_input_guardrail_dedupes_across_turns_same_conversation(monkeypatch):
+    captured: list[list[dict[str, str]]] = []
+
+    async def fake_analyze(messages, *args, **kwargs):
+        captured.append(messages)
+        return _analysis_response(action="Alert")
+
+    monkeypatch.setattr(hl_agents, "_analyze_content", fake_analyze)
+
+    agent = Agent(name="Customer support agent", instructions="You are helpful.", model="gpt-4o-mini")
+    guardrail = agent.input_guardrails[0]
+
+    thread_ctx = RunContextWrapper(context={"conversation_id": "thread-1"})
+    first_turn = [{"role": "user", "content": "hello"}]
+    second_turn = [{"role": "user", "content": "hello"}, {"role": "assistant", "content": "hi there"}]
+
+    await guardrail.run(agent, first_turn, thread_ctx)
+    await guardrail.run(agent, second_turn, thread_ctx)
+
+    assert captured == [
+        [{"role": "user", "content": "hello"}],
+        [{"role": "assistant", "content": "hi there"}],
+    ]
 
 
 class _OutputModel(BaseModel):
@@ -439,7 +466,11 @@ async def test_mcp_wrapper_caches_scans_and_filters_blocked(monkeypatch):
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_tool_input_guardrail_ignores_redact_action(monkeypatch):
-    async def fake_analyze(*args, **kwargs):
+    captured = {}
+
+    async def fake_analyze(messages, role, *args, **kwargs):
+        captured["messages"] = messages
+        captured["role"] = role
         return _analysis_response(action="Redact", role="user")
 
     monkeypatch.setattr(hl_agents, "_analyze_content", fake_analyze)
@@ -452,6 +483,8 @@ async def test_tool_input_guardrail_ignores_redact_action(monkeypatch):
 
     result = await guardrail.run(data)
     assert result.behavior["type"] == "allow"
+    assert captured["role"] == "assistant"
+    assert captured["messages"] == [{"role": "assistant", "content": '{"x": 1}'}]
 
 
 @pytest.mark.unit
@@ -475,8 +508,8 @@ async def test_tool_output_guardrail_ignores_redact_action(monkeypatch):
 
     result = await guardrail.run(data)
     assert result.behavior["type"] == "allow"
-    assert captured["role"] == "assistant"
-    assert captured["messages"] == [{"role": "assistant", "content": '{"ok": true}'}]
+    assert captured["role"] == "user"
+    assert captured["messages"] == [{"role": "user", "content": '{"ok": true}'}]
 
 
 @pytest.mark.unit

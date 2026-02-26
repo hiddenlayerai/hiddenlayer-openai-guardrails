@@ -165,9 +165,9 @@ If HiddenLayer returns a `BLOCK` action for the final streamed output, `safe_str
   - Agent-level input/output guardrails that analyze user and assistant messages.
   - Tool-level guardrails that inspect tool arguments before execution and tool output afterward.
 - Guardrails rely on `AsyncHiddenLayer.interactions.analyze` and will raise when HiddenLayer signals a blocking action.
-- Input guardrails normalize and forward the full conversation message list so HiddenLayer sees the same message flow the model receives.
+- Input guardrails scan one message per request, in order, and skip already-seen messages for the same conversation thread.
 - Tool guardrails currently enforce block-only behavior; `REDACT` actions are not applied in tool hooks.
-- Tool output scanning is sent through the output phase with assistant-role message semantics.
+- Strict phase mapping is used: model-produced tool arguments scan as `output`, and tool results destined for the model scan as `input`.
 
 ### Development
 
