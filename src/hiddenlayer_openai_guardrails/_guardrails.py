@@ -40,6 +40,7 @@ _THREAD_ID_KEYS = (
 )
 # (agent_id, thread_key) -> {scan_key: blocked}
 _SCAN_DECISION_CACHE: dict[tuple[int, str], dict[str, bool]] = {}
+_EMPTY_SCAN_PAYLOADS = {"", "{}", "[]", "null"}
 
 
 def _extract_thread_key(context: Any) -> str:
@@ -80,6 +81,8 @@ async def _scan_message_once(
     analyze_content: AnalyzeContent,
 ) -> bool:
     normalized_content = normalize_content(content)
+    if normalized_content.strip() in _EMPTY_SCAN_PAYLOADS:
+        return False
     thread_key = _extract_thread_key(context)
     namespace_id = id(agent) if agent is not None else (id(context) if context is not None else id(hiddenlayer_params))
     cache_bucket = _SCAN_DECISION_CACHE.setdefault((namespace_id, thread_key), {})

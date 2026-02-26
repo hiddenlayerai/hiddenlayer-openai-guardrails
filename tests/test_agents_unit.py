@@ -242,6 +242,33 @@ async def test_input_guardrail_skips_non_message_items(monkeypatch):
 
 @pytest.mark.unit
 @pytest.mark.asyncio
+async def test_input_guardrail_skips_empty_structural_payloads(monkeypatch):
+    captured = {"calls": 0}
+
+    async def fake_analyze(*args, **kwargs):
+        captured["calls"] += 1
+        return _analysis_response(action="Alert")
+
+    monkeypatch.setattr(hl_agents, "_analyze_content", fake_analyze)
+
+    agent = Agent(name="Customer support agent", instructions="You are helpful.", model="gpt-4o-mini")
+    guardrail = agent.input_guardrails[0]
+    await guardrail.run(
+        agent,
+        [
+            {"role": "user", "content": {}},
+            {"role": "assistant", "content": []},
+            {"role": "user", "content": None},
+            {"role": "user", "content": "real content"},
+        ],
+        RunContextWrapper(context={"conversation_id": "empty-structures"}),
+    )
+
+    assert captured["calls"] == 1
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
 async def test_input_guardrail_dedupes_across_turns_same_conversation(monkeypatch):
     captured: list[list[dict[str, str]]] = []
 
