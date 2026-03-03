@@ -532,7 +532,7 @@ wheels = [
 
 [[package]]
 name = "hiddenlayer-openai-guardrails"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "." }
 dependencies = [
     { name = "hiddenlayer-sdk" },
@@ -549,7 +549,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "hiddenlayer-sdk", specifier = ">=3.3.0" },
+    { name = "hiddenlayer-sdk", specifier = ">=3.5.0" },
     { name = "openai-agents", specifier = ">=0.6.1" },
 ]
 
@@ -563,7 +563,7 @@ dev = [
 
 [[package]]
 name = "hiddenlayer-sdk"
-version = "3.3.0"
+version = "3.5.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
@@ -576,9 +576,9 @@ dependencies = [
     { name = "types-requests" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/53/39/93220a89942e05dc3b81432ffaac8b5c8f30b09262897c20cc309c743430/hiddenlayer_sdk-3.3.0.tar.gz", hash = "sha256:5a57863d8cbe311d2849f49986420b4c05825210cfaf53e7202755fcf5e94c2a", size = 168963, upload-time = "2026-02-04T20:13:44.235Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/47/77/cafa6e321c511bd46c60cfc5697e46d39a462c0735bec15d80f31d6a9c43/hiddenlayer_sdk-3.5.0.tar.gz", hash = "sha256:ff11d3c48afba84eaa5b80f4196507129eb3223c8272e34adba9d2d783787d40", size = 171637, upload-time = "2026-03-03T19:06:37.897Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/94/93/8a3dfb6ce27ad6a8502cc86b90d7f637e35f2f4984ce0bfe4dbd75541ed7/hiddenlayer_sdk-3.3.0-py3-none-any.whl", hash = "sha256:b76929b1fc4f78a7e078faf379968e05b480ad55fc3eaddcfe1cef2927e7358e", size = 144594, upload-time = "2026-02-04T20:13:42.976Z" },
+    { url = "https://files.pythonhosted.org/packages/8b/8c/38120943d32ae892512381c5281789ef87e76002bd5eda06e64c40d31f19/hiddenlayer_sdk-3.5.0-py3-none-any.whl", hash = "sha256:1e5c785da0a6bb420031856d308c558f9dc803efb9693089c5633efb8a86de58", size = 145384, upload-time = "2026-03-03T19:06:36.253Z" },
 ]
 
 [[package]]
