@@ -1,11 +1,11 @@
+from hiddenlayer_openai_guardrails._types import (
+    InputBlockedError,
+    OutputBlockedError,
+)
+from hiddenlayer_openai_guardrails._v2_client import V2EvaluationResult
 from hiddenlayer_openai_guardrails.agents import (
     Agent,
     HiddenLayerParams,
-    InputBlockedError,
-    OutputBlockedError,
-    redact_input,
-    redact_output,
-    safe_stream,
 )
 
 __all__ = [
@@ -13,7 +13,5 @@ __all__ = [
     "HiddenLayerParams",
     "InputBlockedError",
     "OutputBlockedError",
-    "redact_input",
-    "redact_output",
-    "safe_stream",
+    "V2EvaluationResult",
 ]

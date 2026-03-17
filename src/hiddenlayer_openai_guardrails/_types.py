@@ -1,5 +1,4 @@
 import os
-from dataclasses import dataclass
 from enum import Enum
 
 from pydantic import BaseModel, Field
@@ -26,13 +25,3 @@ class InputBlockedError(Exception):
 
 class OutputBlockedError(Exception):
     """Raised when HiddenLayer blocks the output."""
-
-
-@dataclass
-class AnalysisResult:
-    """Unified result from HiddenLayer analysis."""
-
-    block: bool
-    redact: bool
-    redacted_content: str | None
-
