@@ -93,19 +93,16 @@ class Agent:
         """
         # Apply tool-level guardrails
         model = agent_kwargs.get("model", None)
-        model = _parse_model(model)
-
-        # Use provided params or create defaults
-        if hiddenlayer_params is None:
-            hiddenlayer_params = HiddenLayerParams(model=model)
-
-        if not hiddenlayer_params.model:
-            hiddenlayer_params.model = model
 
         if isinstance(model, HiddenLayerProtectedModel):
             wrapped_model = model
         else:
             model_name, openai_client = _extract_model_and_client(model)
+            if hiddenlayer_params is None:
+                hiddenlayer_params = HiddenLayerParams(model=model_name)
+
+            if not hiddenlayer_params.model:
+                hiddenlayer_params.model = model_name
             wrapped_model = HiddenLayerProtectedModel(
                 model=model_name,
                 openai_client=openai_client,

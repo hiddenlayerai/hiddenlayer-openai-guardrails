@@ -1,3 +1,10 @@
+from importlib.metadata import version, PackageNotFoundError
+
+try:
+    __version__ = version("hiddenlayer-openai-guardrails")
+except PackageNotFoundError:
+    __version__ = "unknown"
+
 from hiddenlayer_openai_guardrails._types import (
     InputBlockedError,
     OutputBlockedError,
@@ -9,6 +16,7 @@ from hiddenlayer_openai_guardrails.agents import (
 )
 
 __all__ = [
+    "__version__",
     "Agent",
     "HiddenLayerParams",
     "InputBlockedError",

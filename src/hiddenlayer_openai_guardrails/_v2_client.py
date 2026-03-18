@@ -8,7 +8,10 @@ from typing import Any
 import httpx
 from hiddenlayer import AsyncHiddenLayer
 
+from . import __version__
 from ._types import HiddenLayerParams
+
+_PACKAGE_NAME = "openai-guardrails-sdk"
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +43,8 @@ async def evaluate(
 
     headers: dict[str, str] = {
         "Hl-Roundtrip-Id": roundtrip_id,
+        "HL-Runtime-Edge-Provider": _PACKAGE_NAME,
+        "HL-Runtime-Edge-Provider-Version": __version__,
     }
     if params.project_id:
         headers["HL-Project-Id"] = params.project_id
