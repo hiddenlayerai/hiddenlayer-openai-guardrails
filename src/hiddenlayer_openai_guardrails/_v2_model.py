@@ -48,11 +48,13 @@ class _StreamingResponseEvaluator:
         client: AsyncHiddenLayer,
         params: HiddenLayerParams,
         roundtrip_id: str,
+        session_id: str | None = None,
     ) -> None:
         self._stream = stream
         self._client = client
         self._params = params
         self._roundtrip_id = roundtrip_id
+        self._session_id = session_id
         self._content_parts: list[str] = []
         self._model: str | None = None
         self._finish_reason: str | None = None
@@ -96,6 +98,7 @@ class _StreamingResponseEvaluator:
                 payload,
                 self._params,
                 roundtrip_id=self._roundtrip_id,
+                session_id=self._session_id,
             )
 
 
@@ -276,19 +279,32 @@ class HiddenLayerProtectedModel(OpenAIChatCompletionsModel):
         )
 
         roundtrip_id = str(uuid.uuid4())
+
+        if self._hiddenlayer_params.exclude_tools_from_evaluation and "tools" in request_payload:
+            eval_payload = {k: v for k, v in request_payload.items() if k not in ("tools", "tool_choice")}
+        else:
+            eval_payload = request_payload
+
         request_eval = await evaluate(
             self._hiddenlayer_client,
             REQUEST_EVALUATION_PATH,
-            request_payload,
+            eval_payload,
             self._hiddenlayer_params,
             roundtrip_id=roundtrip_id,
+            session_id=self._hiddenlayer_params.session_id,
         )
 
         if request_eval.blocked:
             raise InputBlockedError("Blocked by HiddenLayer due to model input policy violation.")
             # return self._chat_completion_from_payload(request_eval.payload)
 
-        effective_request_payload = request_eval.payload or request_payload
+        effective_request_payload = request_eval.payload or eval_payload
+
+        if self._hiddenlayer_params.exclude_tools_from_evaluation:
+            if "tools" in request_payload:
+                effective_request_payload = {**effective_request_payload, "tools": request_payload["tools"]}
+            if "tool_choice" in request_payload:
+                effective_request_payload = {**effective_request_payload, "tool_choice": request_payload["tool_choice"]}
 
         ret = await self._get_client().chat.completions.create(
             **effective_request_payload,
@@ -302,6 +318,7 @@ class HiddenLayerProtectedModel(OpenAIChatCompletionsModel):
                 client=self._hiddenlayer_client,
                 params=self._hiddenlayer_params,
                 roundtrip_id=roundtrip_id,
+                session_id=self._hiddenlayer_params.session_id,
             )
 
         if isinstance(ret, ChatCompletion):
@@ -311,6 +328,7 @@ class HiddenLayerProtectedModel(OpenAIChatCompletionsModel):
                 ret.model_dump(),
                 self._hiddenlayer_params,
                 roundtrip_id=roundtrip_id,
+                session_id=self._hiddenlayer_params.session_id,
             )
             if response_eval.blocked:
                 raise OutputBlockedError("Blocked by HiddenLayer due to model output policy violation.")
